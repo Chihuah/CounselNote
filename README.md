@@ -175,7 +175,7 @@ SUMMARY_PROMPT = """
 
 ---
 
-## 性能建議（以 nVidia 1080 Ti 為例）
+## 性能建議（以 nVidia 1080Ti 為例）
 
 - `ASR_MODEL_SIZE` 可依 GPU 記憶體調整：`large-v3` 精準、`medium` 較快。
 - `compute_type` 建議 `int8` 或 `int8_float16`。
@@ -200,9 +200,9 @@ SUMMARY_PROMPT = """
 
 ## Roadmap
 
-- 本程式可選擇使用 LM Studio 之本地模型進行摘要總結，但尚未經過詳細測試，可能仍有錯誤存在，尚待除錯。而經實測， Ollama qwen3:4b 可用，但由於預設具備思考模式，因此需後處理相關標籤：`</think>`。例如`local_asr_pipeline.py`裡第165行的函式`text_after_last_think`
+- 本程式可選擇使用 LM Studio 之本地模型進行摘要總結，但尚未經過詳細測試，可能仍有錯誤存在，尚待除錯。而經實測， Ollama qwen3:4b 可用，但由於預設具備思考模式，因此需後處理相關標籤：`</think>`。例如`local_asr_pipeline.py`裡第 165 行的函式`text_after_last_think`。
 - 後續製作 GUI 介面（Tkinter / PySimpleGUI），方便操作。
-- 試用其他ASR模型，如`Qwen3-ASR-Flash`
+- 試用其他 ASR 模型，如`Qwen3-ASR-Flash`。
 - SRT 字幕輸出（含毫秒時間軸）。
 - 說話者分離（speaker diarization）。
 - JSON Schema 驗證與 `.jsonl` 匯出。
