@@ -217,7 +217,7 @@ SUMMARY_PROMPT = """
 
 最終形成了 CounselNote：一個以隱私優先、可維運為核心的本地端工具，能把輔導會談錄音穩定地轉成逐字稿（TXT）與結構化摘要（JSON），並為後續的去識別化、SRT、說話者分離與報表分析預留擴充空間。
 
-本專案之開發過程，先以 ChatGPT 5 網頁對話，草擬核心程式碼，再到本機端使用 OpenAI Codex CLI(model: gpt-5-codex) 完成後續程式碼編寫和除錯，以及補充說明文件。最終大約使用了 553K tokens。
+本專案之開發過程，先以 ChatGPT 5 網頁對話，草擬核心程式碼，再到本機端使用 OpenAI Codex CLI(model: gpt-5-codex) 完成後續程式碼編寫和除錯，以及補充說明文件。最終 token 使用量為： `Token usage: total=646,184 input=552,595 (+ 8,362,240 cached) output=93,589 (reasoning 58,560)`。
 
 ---
 
