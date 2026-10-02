@@ -26,20 +26,46 @@ import os
 import re
 import json
 import argparse
+import gc
 import time
 from datetime import datetime
 from typing import Dict, Any, List, Tuple, Optional
+import importlib.util
 import requests
-from faster_whisper import WhisperModel
+from opencc import OpenCC
+
+
+def register_nvidia_dll_dirs() -> None:
+    """Windows 下把 pip 安裝的 nvidia-cublas/cudnn-cu12 的 bin 目錄加入 DLL 搜尋路徑。"""
+    if os.name != "nt":
+        return
+    spec = importlib.util.find_spec("nvidia")
+    for root in (spec.submodule_search_locations if spec else None) or []:
+        for name in sorted(os.listdir(root)):
+            bin_dir = os.path.join(root, name, "bin")
+            if os.path.isdir(bin_dir):
+                os.add_dll_directory(bin_dir)
+                os.environ["PATH"] = bin_dir + os.pathsep + os.environ.get("PATH", "")
+
+
+register_nvidia_dll_dirs()
+from faster_whisper import WhisperModel  # noqa: E402  需在 DLL 路徑註冊後匯入
 
 # ======== 預設參數 ========
 ASR_MODEL_SIZE = "large-v3"
 DEVICE = "cuda"
-COMPUTE_TYPE = "int8"     # 1080Ti 建議 int8 或 int8_float16
+COMPUTE_TYPE = "float16"  # RTX 5080（16GB）可直接用 float16；VRAM 不足時改 int8_float16 或 int8
 LMSTUDIO_API = "http://localhost:1234/v1/chat/completions"
 LMSTUDIO_MODEL = "qwen2.5-7b-instruct"
 OLLAMA_API = "http://localhost:11434/api/chat"
 OLLAMA_MODEL = "qwen3:4b"
+OLLAMA_NUM_CTX = 16384    # Ollama 預設 4096，長逐字稿會被截掉開頭的指令
+_TO_TRADITIONAL = OpenCC("s2twp")  # 簡體 → 臺灣正體（含慣用詞，如 软件→軟體）
+
+
+def to_traditional(text: str) -> str:
+    """將文字中的簡體字轉成臺灣正體；已是正體的內容維持不變。"""
+    return _TO_TRADITIONAL.convert(text)
 
 INIT_PROMPT = (
     "以下是大學老師與大一學生的一對一輔導談話逐字稿。請用正體中文理解口語，保留教育場域語境。"
@@ -93,6 +119,14 @@ def get_whisper_model() -> Tuple[WhisperModel, str, str]:
     _WHISPER_MODEL_COMPUTE = compute
     return model, device, compute
 
+def release_whisper_model() -> None:
+    """釋放 Whisper 模型與其佔用的 VRAM，讓 LLM 摘要可使用完整顯示記憶體。"""
+    global _WHISPER_MODEL, _WHISPER_MODEL_DEVICE, _WHISPER_MODEL_COMPUTE
+    _WHISPER_MODEL = None
+    _WHISPER_MODEL_DEVICE = None
+    _WHISPER_MODEL_COMPUTE = None
+    gc.collect()
+
 def transcribe(audio_path: str) -> Tuple[str, float]:
     """faster-whisper 語音轉文字"""
     model, device_used, compute_used = get_whisper_model()
@@ -109,7 +143,7 @@ def transcribe(audio_path: str) -> Tuple[str, float]:
         mm = int(seg.start // 60)
         ss = int(seg.start % 60)
         ts = f"[{mm:02d}:{ss:02d}] "
-        lines.append(ts + (seg.text or "").strip())
+        lines.append(ts + to_traditional((seg.text or "").strip()))
     transcript = "\n".join(lines)
     print(f"[info] transcription finished {audio_path} ({info.duration:.1f}s)")
     return transcript, info.duration
@@ -137,7 +171,8 @@ def call_ollama(model: str, content: str) -> str:
             {"role": "user", "content": SUMMARY_PROMPT + "\n\n逐字稿：\n" + content}
         ],
         "stream": False,
-        "options": {"temperature": 0.2}
+        "format": "json",
+        "options": {"temperature": 0.2, "num_ctx": OLLAMA_NUM_CTX}
     }
     r = requests.post(OLLAMA_API, json=payload, timeout=600)
     r.raise_for_status()
@@ -184,10 +219,10 @@ def summarize(provider: str, model: str, transcript: str) -> Dict[str, Any]:
     except json.JSONDecodeError as e:
         raise ValueError(f"LLM 回傳非 JSON：{e}\n原始：\n{raw}")
     return {
-        "summary": str(data.get("summary", "")).strip(),
+        "summary": to_traditional(str(data.get("summary", "")).strip()),
         "categories": coerce_list(data.get("categories", [])),
-        "risk_flags": coerce_list(data.get("risk_flags", [])),
-        "followups": coerce_list(data.get("followups", []))
+        "risk_flags": [to_traditional(s) for s in coerce_list(data.get("risk_flags", []))],
+        "followups": [to_traditional(s) for s in coerce_list(data.get("followups", []))]
     }
 
 def preferred_transcript_path(audio_path: str, out_dir: str) -> str:
@@ -227,7 +262,10 @@ def process_one(audio_path: str, provider: str, lmstudio_model: str, ollama_mode
             seconds = 0
             trans_duration = 0.0
         else:
-            transcript_txt, seconds = transcribe(audio_path)
+            try:
+                transcript_txt, seconds = transcribe(audio_path)
+            finally:
+                release_whisper_model()
             out_txt = preferred_transcript_path(audio_path, out_dir)
             with open(out_txt, "w", encoding="utf-8") as f:
                 f.write(transcript_txt)
