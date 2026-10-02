@@ -15,6 +15,8 @@
 - **批次支援**：給定資料夾即可遞迴處理所有支援的音檔。
 - **ASR 快取**：若既有 `outputs/<檔名>.txt` 或音檔同層的 TXT，即可跳過轉錄（可用 `--force` 強制重跑）。
 - **摘要快取**：若既有 `outputs/<檔名>.json`，則跳過摘要生成（同樣可用 `--force` 覆寫）。
+- **簡轉繁**：逐字稿與摘要皆經 OpenCC（`s2twp`）轉為臺灣正體，含慣用詞（如「软件」→「軟體」）。
+- **VRAM 管理**：轉錄完成後立即釋放 Whisper 模型，讓 LLM 摘要可使用完整顯示記憶體。
 - **狀態日誌**：輸出每個檔案的轉錄與摘要耗時，以及整批處理總耗時。
 - **JSON 結構**：方便匯入校務系統或資料庫，亦可搭配 CSV 匯出工具。
 
@@ -60,7 +62,9 @@ python -m pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-> GPU 使用者建議安裝 **CUDA** 並更新 NVIDIA 顯示卡驅動程式。
+> **GPU 使用者**：只需更新 NVIDIA 顯示卡驅動程式（需支援 CUDA 12）。Windows 下 `requirements.txt` 會一併安裝 `nvidia-cublas-cu12` 與 `nvidia-cudnn-cu12`，程式啟動時會自動註冊 DLL 路徑，**不需另外安裝 CUDA Toolkit**。
+>
+> `av` 被限制在 `<19`：av 19 移除了 `metadata_errors` 參數，與目前的 faster-whisper 不相容。
 
 ---
 
@@ -80,6 +84,16 @@ pip install -r requirements.txt
    ollama pull qwen3:4b
    ```
 3. 執行程式時帶入 `--provider ollama --ollama_model qwen3:4b`。
+
+**模型選擇建議**（皆需為非思考型 Instruct 模型）：
+
+| 模型 | 大小 | 說明 |
+| --- | --- | --- |
+| `qwen3:30b-a3b-instruct-2507-q4_K_M` | 19GB | 實測摘要品質最佳、速度快（MoE，每 token 僅啟用約 3B 參數），超出 16GB VRAM 的部分會使用系統記憶體 |
+| `qwen2.5:14b-instruct` | 9GB | 可完整放進 16GB VRAM，但摘要偏短、較不遵守字數 |
+| `qwen3:4b` | 小型 | 預設值，資源需求低；具思考模式，程式會以 `text_after_last_think` 移除 `</think>` 前的內容 |
+
+程式對 Ollama 請求固定設定 `num_ctx=16384` 與 `format: json`。Ollama 預設 context 僅 4096 tokens，長逐字稿（實測約 8,000 字的逐字稿即發生）會被從開頭截斷，導致提示詞遺失、摘要變空白。可在 `local_asr_pipeline.py` 的 `OLLAMA_NUM_CTX` 調整；逐字稿更長時請調高。
 
 ---
 
@@ -139,7 +153,7 @@ python src/merge_json_to_csv.py outputs -o summaries.csv
   "file": "D:/audio/case_20241003.mp3",
   "processed_at": "2025-10-05T12:00:00",
   "duration_sec": 3725,
-  "summary": "150-250 字內的重點概述，拆解師生觀點。",
+  "summary": "350–450 字的重點概述，區分師生觀點。",
   "categories": ["課業", "心理"],
   "risk_flags": ["提及長期失眠"],
   "followups": ["兩週後回訪睡眠狀況", "轉介校內諮商初談"]
@@ -175,10 +189,10 @@ SUMMARY_PROMPT = """
 
 ---
 
-## 性能建議（以 nVidia 1080Ti 為例）
+## 性能建議
 
 - `ASR_MODEL_SIZE` 可依 GPU 記憶體調整：`large-v3` 精準、`medium` 較快。
-- `compute_type` 建議 `int8` 或 `int8_float16`。
+- `COMPUTE_TYPE` 預設 `float16`（RTX 5080 16GB 實測可用）；VRAM 較小的舊卡（如 1080Ti）請改為 `int8_float16` 或 `int8`。
 - `beam_size` 可降低至 `1~3` 以提升速度。
 - 預設啟用 `vad_filter=True` 以去除靜音段落。
 
@@ -188,8 +202,14 @@ SUMMARY_PROMPT = """
 
 - **Q：找不到 GPU？**
   A：請更新 NVIDIA 驅動並安裝 CUDA Runtime；若仍失敗可將 `DEVICE` 改為 `cpu`。
-- **Q：LLM 回傳不是 JSON？**
-  A：請確認選用 Instruct 模型並保持 `temperature=0.2`；仍失敗可檢查日誌並調整提示詞。
+- **Q：出現 `open() got an unexpected keyword argument 'metadata_errors'`？**
+  A：`av` 版本過新（19 以上已移除該參數）。請執行 `pip install -r requirements.txt`，或手動 `pip install "av<19"`。
+- **Q：出現 `Library cublas64_12.dll is not found or cannot be loaded`？**
+  A：缺少 CUDA 12 的 cuBLAS／cuDNN。請執行 `pip install nvidia-cublas-cu12 nvidia-cudnn-cu12`（已列於 `requirements.txt`）；程式會自動註冊其 DLL 路徑。
+- **Q：LLM 回傳不是 JSON，或摘要是空的？**
+  A：請確認選用 Instruct 模型並保持 `temperature=0.2`。若逐字稿很長，先檢查 `OLLAMA_NUM_CTX` 是否足夠（見「準備在地 LLM」）；仍失敗可檢查日誌並調整提示詞。
+- **Q：把輸出導向檔案或管線時出現 `UnicodeEncodeError`？**
+  A：Windows 預設編碼（cp950）無法輸出 emoji。請先設定 `$env:PYTHONIOENCODING = "utf-8"`；直接在終端機執行不受影響。
 - **Q：依賴版本不相容？**
   A：請將目前環境輸出：
   ```powershell
@@ -200,7 +220,7 @@ SUMMARY_PROMPT = """
 
 ## Roadmap
 
-- 本程式可選擇使用 LM Studio 之本地模型進行摘要總結，但尚未經過詳細測試，可能仍有錯誤存在，尚待除錯。而經實測， Ollama qwen3:4b 可用，但由於預設具備思考模式，因此需後處理相關標籤：`</think>`。例如`local_asr_pipeline.py`裡第 165 行的函式`text_after_last_think`。
+- 本程式可選擇使用 LM Studio 之本地模型進行摘要總結，但尚未經過詳細測試，可能仍有錯誤存在，尚待除錯。而經實測， Ollama qwen3:4b 可用，但由於預設具備思考模式，因此需後處理相關標籤：`</think>`。例如`local_asr_pipeline.py`裡的函式`text_after_last_think`。
 - 後續製作 GUI 介面（Tkinter / PySimpleGUI），方便操作。
 - SRT 字幕輸出（含毫秒時間軸）。
 - 說話者分離（speaker diarization）。
