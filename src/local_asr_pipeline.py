@@ -77,7 +77,7 @@ SUMMARY_PROMPT = """
 {
   "summary": "<以繁體中文撰寫，350–450字。請在摘要中清楚區分老師與學生的觀點／重點>",
   "categories": [ "<從下列候選值中擇一或多個：課業、生活、交友、心理、生涯、課外活動>", ... ],
-  "risk_flags": [ "<可留空陣列；如有，列出具體風險點，如：長期失眠、疑似焦慮、自傷念頭等>", ... ],
+  "risk_flags": [ "<字串陣列，可為空；每項格式：【高】或【中】＋風險描述＋『逐字稿原句』＋[mm:ss]，判斷標準見下方「risk_flags 判斷標準」>", ... ],
   "followups": [ "<教師後續追蹤行動建議（條列列點）>", ... ]
 }
 
@@ -87,6 +87,16 @@ SUMMARY_PROMPT = """
 - "categories" 陣列的元素必須只來自以下候選值：["課業","生活","交友","心理","生涯","課外活動"]；可多選或給空陣列。
 - "summary" 必須 350–450 個中文字，避免個資；必要時可用「學生」「老師」指稱。
 - 不得新增除了 "summary","categories","risk_flags","followups" 以外的鍵。
+
+risk_flags 判斷標準（學生安全優先：寧可標記並註明需人工確認，也不要漏報）：
+- 【高】一律標記：自傷或自殺念頭／計畫；傷害他人；遭受暴力、霸凌或性騷擾；藥物或酒精濫用。
+- 【中】須有明確證據才標記：持續兩週以上的失眠、情緒低落或焦慮；飲食或體重明顯變化；長期缺課或有退學念頭；嚴重人際孤立；經濟困難影響就學。
+- 不標記：一般課業壓力、偶爾熬夜、已有醫療處置且穩定的狀況（例如按時服藥與回診）。
+- 每一項必須是單純的字串（不得使用物件或巢狀結構），格式為「【高/中】<風險描述>：『<逐字稿原句>』[mm:ss]」。
+- 原句必須逐字出自逐字稿，不得改寫或編造；[mm:ss] 必須逐字複製該原句所在那一行行首的時間戳。
+- 等級須與上方分級對應，風險描述須與所引用的原句內容相符，不可把中風險情況標成高風險。
+- 不確定是否構成風險、但可能有安全疑慮時，仍須標記，並在該項結尾加註「（需人工確認）」。
+- 逐字稿中沒有任何符合上述條件的內容時，"risk_flags" 輸出空陣列 []。
 """
 # ===========================
 
@@ -187,11 +197,17 @@ def extract_json_block(text: str) -> str:
         return text[start_idx:end_idx+1]
     return text
 
+def _item_to_str(item) -> str:
+    """列表項目轉字串；若模型誤輸出物件（dict），改取其字串值而非 dict 的 repr。"""
+    if isinstance(item, dict):
+        return " ".join(str(v) for v in item.values())
+    return str(item)
+
 def coerce_list(x) -> List[str]:
     if x is None:
         return []
     if isinstance(x, list):
-        return [str(i) for i in x]
+        return [_item_to_str(i) for i in x]
     if isinstance(x, str):
         parts = [p.strip() for p in re.split(r"[，,]\s*", x) if p.strip()]
         return parts if parts else ([x] if x else [])
@@ -207,7 +223,66 @@ def text_after_last_think(text: str) -> str:
         return text
     last_end = matches[-1].end()
     return text[last_end:].lstrip()
-    
+
+_FLAG_QUOTE = re.compile(r"『(.+?)』")
+_FLAG_STAMP = re.compile(r"\[(\d{2}:\d{2})\]")
+_STAMP_LINE = re.compile(r"\[(\d{2}:\d{2})\] ?(.*)")
+_IGNORED_CHARS = re.compile(r"[\s，。、！？；：,.!?;:「」『』（）()…～~—-]")
+_NEED_REVIEW = "（需人工確認）"
+
+def _normalize(text: str) -> str:
+    """移除空白與標點，供原句比對（Whisper 逐字稿多半無標點，模型引用時可能自行加上）。"""
+    return _IGNORED_CHARS.sub("", text)
+
+def index_transcript(transcript: str) -> Tuple[str, List[Optional[str]]]:
+    """
+    將逐字稿攤平成連續文字，並記錄每個字元所屬行的時間戳（無時間戳的行為 None）。
+    逐字稿先轉為正體，以相容舊版簡體快取。
+    """
+    chars: List[str] = []
+    owners: List[Optional[str]] = []
+    for line in to_traditional(transcript).splitlines():
+        m = _STAMP_LINE.match(line)
+        stamp, body = (m.group(1), m.group(2)) if m else (None, line)
+        normalized = _normalize(body)
+        chars.extend(normalized)
+        owners.extend([stamp] * len(normalized))
+    return "".join(chars), owners
+
+def check_risk_flag(flag: str, flat: str, owners: List[Optional[str]]) -> Optional[str]:
+    """核對單項 risk_flag 的原句與時間戳；通過回傳 None，否則回傳失敗原因。"""
+    quotes = _FLAG_QUOTE.findall(flag)
+    if not quotes:
+        return "缺少逐字稿原句"
+    first_span: set = set()
+    for i, quote in enumerate(quotes):
+        needle = _normalize(quote)
+        pos = flat.find(needle) if needle else -1
+        if pos < 0:
+            return "引用未在逐字稿中找到"
+        if i == 0:
+            first_span = {o for o in owners[pos:pos + len(needle)] if o}
+    if not first_span:
+        return None  # 逐字稿沒有時間戳（如舊版 TXT），僅核對原句
+    stamp = _FLAG_STAMP.search(flag)
+    if not stamp:
+        return "缺少時間戳"
+    if stamp.group(1) not in first_span:
+        return "時間戳與原句不符"
+    return None
+
+def annotate_risk_flags(flags: List[str], transcript: str) -> List[str]:
+    """核對每項 risk_flag（完全相同者只保留第一項）；未通過者保留原項並在結尾加註原因，回傳新的列表。"""
+    flat, owners = index_transcript(transcript)
+    result: List[str] = []
+    for flag in dict.fromkeys(flags):
+        reason = check_risk_flag(flag, flat, owners)
+        if reason is None:
+            result.append(flag)
+        else:
+            result.append(f"{flag.removesuffix(_NEED_REVIEW)}（{reason}，需人工確認）")
+    return result
+
 def summarize(provider: str, model: str, transcript: str) -> Dict[str, Any]:
     raw = call_lmstudio(model, transcript) if provider == "lmstudio" else call_ollama(model, transcript)
     # 先擷取最後一個 </think> 之後的內容（避開可能的思考過程雜訊，例如qwen3:4b）
@@ -221,7 +296,9 @@ def summarize(provider: str, model: str, transcript: str) -> Dict[str, Any]:
     return {
         "summary": to_traditional(str(data.get("summary", "")).strip()),
         "categories": coerce_list(data.get("categories", [])),
-        "risk_flags": [to_traditional(s) for s in coerce_list(data.get("risk_flags", []))],
+        "risk_flags": annotate_risk_flags(
+            [to_traditional(s) for s in coerce_list(data.get("risk_flags", []))], transcript
+        ),
         "followups": [to_traditional(s) for s in coerce_list(data.get("followups", []))]
     }
 
