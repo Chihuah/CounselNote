@@ -3,9 +3,16 @@
 __pycache__/
 *.pyc
 
-# Outputs
-outputs/
+# 個資：音檔、逐字稿、摘要，絕不提交
+outputs*/
+*.mp3
+*.wav
+*.m4a
+*.aac
+*.flac
+*.ogg
 *.srt
+*.csv
 all_summaries.csv
 
 # IDE
