@@ -67,9 +67,10 @@ def to_traditional(text: str) -> str:
     """將文字中的簡體字轉成臺灣正體；已是正體的內容維持不變。"""
     return _TO_TRADITIONAL.convert(text)
 
-INIT_PROMPT = (
-    "以下是大學老師與大一學生的一對一輔導談話逐字稿。請用正體中文理解口語，保留教育場域語境。"
-)
+# Whisper 的 initial_prompt。預設不使用：實測指令式提示詞會在開頭靜音或聽不清處被原樣吐回，
+# 並經由前文條件化一路延續，吞掉前兩分鐘的真實內容；正體轉換已由 OpenCC 處理。
+# 若要設定，請用逐字稿風格的短句而非指令；被吐回的片段會由 is_prompt_echo 濾除。
+INIT_PROMPT: Optional[str] = None
 SUMMARY_PROMPT = """
 你是一位學輔紀錄助理。請根據「逐字稿」產出結構化結果。
 
@@ -112,6 +113,8 @@ def get_whisper_model() -> Tuple[WhisperModel, str, str]:
 
     device = DEVICE
     compute = COMPUTE_TYPE
+    print(f"[info] 載入 Whisper 模型 {ASR_MODEL_SIZE}（首次執行需下載約 3GB，期間不會顯示進度）…")
+    load_start = time.time()
     try:
         model = WhisperModel(ASR_MODEL_SIZE, device=device, compute_type=compute)
     except Exception as exc:
@@ -123,6 +126,7 @@ def get_whisper_model() -> Tuple[WhisperModel, str, str]:
         model = WhisperModel(ASR_MODEL_SIZE, device=fallback_device, compute_type=fallback_compute)
         device = fallback_device
         compute = fallback_compute
+    print(f"[info] Whisper 模型載入完成（{time.time() - load_start:.1f}s）")
 
     _WHISPER_MODEL = model
     _WHISPER_MODEL_DEVICE = device
@@ -137,6 +141,16 @@ def release_whisper_model() -> None:
     _WHISPER_MODEL_COMPUTE = None
     gc.collect()
 
+def format_mmss(seconds: float) -> str:
+    return f"{int(seconds // 60):02d}:{int(seconds % 60):02d}"
+
+def is_prompt_echo(text: str, prompt: Optional[str] = INIT_PROMPT) -> bool:
+    """判斷片段是否為 Whisper 吐回的 initial_prompt（片段整段出自提示詞，且至少 6 字以免誤刪短句）。"""
+    if not prompt:
+        return False
+    needle = _normalize(to_traditional(text))
+    return len(needle) >= 6 and needle in _normalize(to_traditional(prompt))
+
 def transcribe(audio_path: str) -> Tuple[str, float]:
     """faster-whisper 語音轉文字"""
     model, device_used, compute_used = get_whisper_model()
@@ -148,12 +162,22 @@ def transcribe(audio_path: str) -> Tuple[str, float]:
         vad_filter=True,
         beam_size=5,
     )
+    total = format_mmss(info.duration)
     lines = []
+    dropped = 0
+    next_pct = 10
     for seg in segments:
-        mm = int(seg.start // 60)
-        ss = int(seg.start % 60)
-        ts = f"[{mm:02d}:{ss:02d}] "
-        lines.append(ts + to_traditional((seg.text or "").strip()))
+        text = to_traditional((seg.text or "").strip())
+        if is_prompt_echo(text):
+            dropped += 1
+        else:
+            lines.append(f"[{format_mmss(seg.start)}] {text}")
+        pct = seg.end / info.duration * 100 if info.duration else 100
+        if pct >= next_pct:
+            print(f"[info] 轉錄進度 {min(pct, 100):.0f}%（{format_mmss(seg.end)} / {total}）")
+            next_pct = (int(pct) // 10 + 1) * 10
+    if dropped:
+        print(f"[warn] 已濾除 {dropped} 段 Whisper 吐回提示詞的片段")
     transcript = "\n".join(lines)
     print(f"[info] transcription finished {audio_path} ({info.duration:.1f}s)")
     return transcript, info.duration

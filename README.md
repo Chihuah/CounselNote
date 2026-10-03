@@ -35,7 +35,8 @@ CounselNote/                        # 專案根目錄
 │  ├─ local_asr_pipeline.py         # 轉錄＋摘要 CLI 主流程 (含快取邏輯、計時、risk_flags 核對)
 │  └─ merge_json_to_csv.py          # 將 outputs/ 中的摘要 JSON 合併為 CSV 的小工具
 ├─ tests/
-│  └─ test_risk_flags.py            # risk_flags 核對與摘要整合測試（不呼叫 LLM）
+│  ├─ test_risk_flags.py            # risk_flags 核對與摘要整合測試（不呼叫 LLM）
+│  └─ test_transcribe.py            # 提示詞回聲過濾等轉錄輔助函式測試
 └─ outputs/                         # 產生的逐字稿與摘要結果（已在 .gitignore 中忽略內容）
 ```
 
@@ -240,6 +241,10 @@ LLM 可能編造原句或寫錯時間戳，因此 `summarize` 會對每一項 `r
 
 ## 常見問題（FAQ）
 
+- **Q：第一次執行停在「載入 Whisper 模型」很久，看起來像當掉？**
+  A：首次執行會從 Hugging Face 下載 large-v3（約 3GB），faster-whisper 下載時不顯示進度。若網路中斷，`~/.cache/huggingface/hub/models--Systran--faster-whisper-large-v3/blobs/` 會留下 `.incomplete` 檔；中斷程式後重跑即可續傳。模型載入後會每 10% 印出轉錄進度。
+- **Q：逐字稿開頭反覆出現提示詞般的句子？**
+  A：這是 Whisper `initial_prompt` 的幻覺：會在靜音處把提示詞原樣吐回，並吞掉真實內容。因此 `INIT_PROMPT` 預設為 `None`；若自行設定，請用逐字稿風格的短句，程式會濾除被吐回的片段。
 - **Q：找不到 GPU？**
   A：請更新 NVIDIA 驅動並安裝 CUDA Runtime；若仍失敗可將 `DEVICE` 改為 `cpu`。
 - **Q：出現 `open() got an unexpected keyword argument 'metadata_errors'`？**
